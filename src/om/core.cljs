@@ -49,6 +49,13 @@
 ;; =============================================================================
 ;; Om Protocols
 
+(defprotocol IAddUnmountListener
+  (-add-unmount-listener! [this c]))
+
+(defprotocol IStore
+  (-watched [this])
+  (-store-lookup [this c ks]))
+
 (defprotocol IOmSwap
   (-om-swap! [this cursor korks f tag]))
 
@@ -262,9 +269,13 @@
    :componentWillUnmount
    (fn []
      (this-as this
-       (let [c (children this)]
+       (let [c         (children this)
+             listeners (aget (.-state this) "__unmount_listeners")]
          (when (satisfies? IWillUnmount c)
-           (allow-reads (will-unmount c))))))
+           (allow-reads (will-unmount c)))
+         (when-not (nil? listeners)
+           (doseq [f @listeners]
+             (f))))))
    :componentWillUpdate
    (fn [next-props next-state]
      (this-as this
@@ -318,6 +329,15 @@
 
 (defn specify-state-methods! [obj]
   (specify! obj
+    IAddUnmountListener
+    (-add-unmount-listener! [this f]
+      (let [state     (.-state this)
+            listeners (aget state "__unmount_listeners")]
+        (if (nil? listeners)
+          (let [listeners (atom [])]
+            (aset state "__unmount_listeners" listeners)
+            (swap! listeners conj f)))
+        (swap! listeners conj f)))
     ISetState
     (-set-state!
       ([this val render]
@@ -721,6 +741,31 @@
 (defn ^:private tear-down [state key]
   (-unlisten! state key))
 
+(defn make-store [state]
+  (let [watched-components (atom #{})
+        patch-transact!
+        (fn patch-transact! [cursor c]
+          (specify! cursor
+            ICursorDerive
+            (-derive [this derived state path]
+              (patch-transact!
+                (to-cursor derived state path)))
+            ITransact
+            (-transact! [this korks f tag]
+              (-queue-render! state c)
+              (transact* state this korks f tag))))]
+   (reify
+     IStore
+     (-watched [this]
+       @watched-components)
+     (-store-lookup [this c ks]
+       (when-not (contains? @watched-components c)
+         (swap! watched-components conj c)
+         (.addUnmountListener c
+           (fn [] (swap! watched-components disj c))))
+       (patch-transact!
+         (to-cursor (get-in @state ks) state ks) c)))))
+
 (defn root
   "Take a component constructor function f, value an immutable tree of
    associative data structures optionally an wrapped in an IAtom
@@ -757,7 +802,7 @@
        ...)
      {:message :hello}
      {:target js/document.body})"
-  ([f value {:keys [target tx-listen path instrument] :as options}]
+  ([f value {:keys [target tx-listen path instrument store] :as options}]
     (assert (not (nil? target)) "No target specified to om.core/root")
     ;; only one root render loop per target
     (let [roots' @roots]
@@ -768,7 +813,9 @@
                   value
                   (atom value))
           state (setup state watch-key tx-listen)
-          m     (dissoc options :target :tx-listen :path)
+          m     (->> options
+                  (dissoc :target :tx-listen :path)
+                  (assoc-in [:shared ::store] (or store (make-store state))))
           rootf (fn rootf []
                   (swap! refresh-set disj rootf)
                   (let [value  @state
@@ -900,3 +947,7 @@
   []
   (true? *read-enabled*))
 
+(defn get-store [owner korks]
+  (let [store (get-shared owner ::store)
+        ks    (if (sequential? korks) korks [korks])]
+    (-store-lookup store owner korks)))
