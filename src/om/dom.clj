@@ -62,6 +62,7 @@
     main
     map
     mark
+    marquee
     menu
     menuitem
     meta
@@ -108,7 +109,7 @@
     var
     video
     wbr
-    
+
     ;; svg
     circle
     ellipse
